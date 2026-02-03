@@ -279,12 +279,21 @@ public class RNWifiModule extends ReactContextBaseJavaModule {
         String ssid = options.getString("ssid");
         String password = options.getString("password");
         boolean isHidden = options.hasKey("isHidden") && options.getBoolean("isHidden");
+        boolean usePrefix = options.hasKey("usePrefix") && options.getBoolean("usePrefix");
         int secondsTimeout = options.hasKey("timeout") ? options.getInt("timeout") * 1000 : TIMEOUT_MILLIS;
 
-        this.removeWifiNetwork(ssid, promise, () -> {
-            assert ssid != null;
-            connectToWifiDirectly(ssid, password, isHidden, secondsTimeout, promise);
-        }, TIMEOUT_REMOVE_MILLIS);
+        Log.i(TAG, "=== connectToProtectedWifiSSID ===");
+        Log.i(TAG, "ssid: " + ssid + ", usePrefix: " + usePrefix + ", hasUsePrefix: " + options.hasKey("usePrefix"));
+
+        if (usePrefix) {
+            // For prefix matching, go directly to connect without removing
+            connectToWifiWithPrefix(ssid, password, isHidden, secondsTimeout, promise);
+        } else {
+            this.removeWifiNetwork(ssid, promise, () -> {
+                assert ssid != null;
+                connectToWifiDirectly(ssid, password, isHidden, secondsTimeout, promise);
+            }, TIMEOUT_REMOVE_MILLIS);
+        }
     }
 
 
@@ -572,12 +581,75 @@ public class RNWifiModule extends ReactContextBaseJavaModule {
         }
     }
 
-    private void connectToWifiDirectly(@NonNull final String SSID, @NonNull final String password, final boolean isHidden, final int timeout, final Promise promise) {
+    private void connectToWifiDirectly(@NonNull final String SSID, @Nullable final String password, final boolean isHidden, final int timeout, final Promise promise) {
+        Log.i(TAG, "connectToWifiDirectly: SSID=" + SSID + ", Android10+=" + isAndroidTenOrLater());
         if (isAndroidTenOrLater()) {
             connectAndroidQ(SSID, password, isHidden, timeout, promise);
         } else {
-            connectPreAndroidQ(SSID, password, promise);
+            connectPreAndroidQ(SSID, password != null ? password : "", promise);
         }
+    }
+
+    /**
+     * Connect to WiFi using SSID prefix matching
+     * Scans for available networks, finds one matching the prefix, then connects
+     */
+    private void connectToWifiWithPrefix(@NonNull final String ssidPrefix, @Nullable final String password, final boolean isHidden, final int timeout, final Promise promise) {
+        Log.i(TAG, "=== connectToWifiWithPrefix START ===");
+        Log.i(TAG, "Prefix: " + ssidPrefix + ", password: " + (password != null ? "[set]" : "[empty]") + ", timeout: " + timeout);
+
+        // First, try to find network in existing scan results
+        String matchedSSID = findNetworkByPrefix(ssidPrefix);
+
+        if (matchedSSID != null) {
+            Log.i(TAG, "Found network in existing scan: " + matchedSSID);
+            Log.i(TAG, "Calling connectToWifiDirectly...");
+            connectToWifiDirectly(matchedSSID, password, isHidden, timeout, promise);
+            return;
+        }
+
+        // Not found - trigger a new scan and wait
+        Log.i(TAG, "No network found in cache, triggering new scan...");
+        boolean scanStarted = wifi.startScan();
+        Log.i(TAG, "Scan started: " + scanStarted);
+
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            Log.i(TAG, "Scan wait complete, checking results...");
+            String foundSSID = findNetworkByPrefix(ssidPrefix);
+
+            if (foundSSID == null) {
+                Log.e(TAG, "No network found matching prefix after rescan: " + ssidPrefix);
+                promise.reject(ConnectErrorCodes.didNotFindNetwork.toString(),
+                    "No network found matching prefix: " + ssidPrefix);
+                return;
+            }
+
+            Log.i(TAG, "Found network after rescan: " + foundSSID);
+            Log.i(TAG, "Calling connectToWifiDirectly...");
+            connectToWifiDirectly(foundSSID, password, isHidden, timeout, promise);
+        }, 3000); // Wait 3 seconds for scan to complete
+    }
+
+    /**
+     * Find first network matching SSID prefix in scan results
+     */
+    @Nullable
+    private String findNetworkByPrefix(@NonNull final String ssidPrefix) {
+        List<ScanResult> scanResults = wifi.getScanResults();
+        Log.i(TAG, "findNetworkByPrefix: Looking for prefix '" + ssidPrefix + "' in " + scanResults.size() + " networks");
+
+        for (ScanResult result : scanResults) {
+            String ssid = result.SSID;
+            if (ssid != null && !ssid.isEmpty()) {
+                Log.d(TAG, "  - Checking: '" + ssid + "'");
+                if (ssid.toLowerCase().startsWith(ssidPrefix.toLowerCase())) {
+                    Log.i(TAG, "  => MATCH FOUND: " + ssid);
+                    return ssid;
+                }
+            }
+        }
+        Log.i(TAG, "findNetworkByPrefix: No match found");
+        return null;
     }
 
     private void connectPreAndroidQ(@NonNull final String SSID, @NonNull final String password, final Promise promise) {
@@ -619,22 +691,29 @@ public class RNWifiModule extends ReactContextBaseJavaModule {
     }
 
     @RequiresApi(api = Build.VERSION_CODES.Q)
-    private void connectAndroidQ(@NonNull final String SSID, @NonNull final String password, final boolean isHidden, final int timeout, final Promise promise) {
+    private void connectAndroidQ(@NonNull final String SSID, @Nullable final String password, final boolean isHidden, final int timeout, final Promise promise) {
+        Log.i(TAG, "=== connectAndroidQ START ===");
+        Log.i(TAG, "SSID: " + SSID + ", password: " + (password == null || password.isEmpty() ? "[empty]" : "[set]") + ", isHidden: " + isHidden + ", timeout: " + timeout);
+
         WifiNetworkSpecifier.Builder wifiNetworkSpecifier = new WifiNetworkSpecifier.Builder()
                 .setIsHiddenSsid(isHidden)
                 .setSsid(SSID);
 
         if (!isNullOrEmpty(password)) {
+            Log.i(TAG, "Setting WPA2 passphrase");
             wifiNetworkSpecifier.setWpa2Passphrase(password);
+        } else {
+            Log.i(TAG, "Open network (no password)");
         }
 
         NetworkRequest nr = new NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-                //.addCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)
                 .setNetworkSpecifier(wifiNetworkSpecifier.build())
                 .build();
+
+        Log.i(TAG, "NetworkRequest built, cleaning up previous connections...");
 
         // cleanup previous connections just in case
         DisconnectCallbackHolder.getInstance().disconnect();
@@ -645,31 +724,37 @@ public class RNWifiModule extends ReactContextBaseJavaModule {
 
         final Handler timeoutHandler = new Handler(Looper.getMainLooper());
         final Runnable timeoutRunnable = () -> {
+            Log.e(TAG, "=== TIMEOUT OCCURRED ===");
             promise.reject(ConnectErrorCodes.timeoutOccurred.toString(), "Connection timeout");
             DisconnectCallbackHolder.getInstance().unbindProcessFromNetwork();
             DisconnectCallbackHolder.getInstance().disconnect();
         };
 
         timeoutHandler.postDelayed(timeoutRunnable, timeout);
+        Log.i(TAG, "Timeout handler set for " + timeout + "ms, requesting network...");
 
         ConnectivityManager.NetworkCallback networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(@NonNull Network network) {
                 super.onAvailable(network);
+                Log.i(TAG, "=== onAvailable callback ===");
                 timeoutHandler.removeCallbacks(timeoutRunnable);
                 joinedNetwork = network;
                 DisconnectCallbackHolder.getInstance().bindProcessToNetwork(network);
-                //connectivityManager.setNetworkPreference(ConnectivityManager.DEFAULT_NETWORK_PREFERENCE);
+                Log.i(TAG, "Network bound, polling for SSID...");
                 if (!pollForValidSSID(3, SSID)) {
+                    Log.e(TAG, "pollForValidSSID failed");
                     promise.reject(ConnectErrorCodes.android10ImmediatelyDroppedConnection.toString(), "Firmware bugs on OnePlus prevent it from connecting on some firmware versions.");
                     return;
                 }
+                Log.i(TAG, "=== CONNECTION SUCCESS ===");
                 promise.resolve("connected");
             }
 
             @Override
             public void onUnavailable() {
                 super.onUnavailable();
+                Log.e(TAG, "=== onUnavailable callback ===");
                 timeoutHandler.removeCallbacks(timeoutRunnable);
                 joinedNetwork = null;
                 promise.reject(ConnectErrorCodes.didNotFindNetwork.toString(), "Network not found or network request cannot be fulfilled.");
@@ -678,6 +763,7 @@ public class RNWifiModule extends ReactContextBaseJavaModule {
             @Override
             public void onLost(@NonNull Network network) {
                 super.onLost(network);
+                Log.w(TAG, "=== onLost callback ===");
                 timeoutHandler.removeCallbacks(timeoutRunnable);
                 joinedNetwork = null;
                 DisconnectCallbackHolder.getInstance().unbindProcessFromNetwork();
@@ -685,8 +771,10 @@ public class RNWifiModule extends ReactContextBaseJavaModule {
             }
         };
 
+        Log.i(TAG, "Adding network callback and requesting network...");
         DisconnectCallbackHolder.getInstance().addNetworkCallback(networkCallback, connectivityManager);
         DisconnectCallbackHolder.getInstance().requestNetwork(nr);
+        Log.i(TAG, "Network request sent, waiting for callback...");
     }
 
     private static String longToIP(int longIp) {

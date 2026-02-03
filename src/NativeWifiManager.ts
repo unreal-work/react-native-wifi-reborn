@@ -22,6 +22,8 @@ export interface ConnectOptions {
   isWEP?: boolean
   isHidden?: boolean
   timeout?: number
+  /** Use SSID prefix matching instead of exact match (Android 10+) */
+  usePrefix?: boolean
 }
 
 /**

@@ -167,11 +167,12 @@ const WifiManager = {
    * Connect to an IoT device's WiFi Access Point
    *
    * This method:
-   * 1. Connects to the specified network
+   * 1. Connects to the specified network (with joinOnce on iOS)
    * 2. Binds all app traffic to this network (Android)
    * 3. Prevents system from switching away due to lack of internet
    *
-   * Use `disconnectFromIoTNetwork()` when done to restore normal networking.
+   * Use `disconnectFromIoTNetwork()` when done - system will auto-reconnect
+   * to the previous network on both platforms.
    *
    * @param ssid IoT device's access point name
    * @param password Password (empty string for open networks)
@@ -189,41 +190,34 @@ const WifiManager = {
   ): Promise<void> => {
     const { usePrefix = false, timeout = 30 } = options
 
-    console.log(`[WifiManager] Connecting to IoT network: ${ssid}`)
+    console.log(`[WifiManager] Connecting to IoT network: ${ssid}, usePrefix: ${usePrefix}, timeout: ${timeout}`)
 
     // Connect to the network
     if (Platform.OS === "android") {
-      // Remove any existing configuration first
-      try {
-        await NativeWifiManager.isRemoveWifiNetwork(ssid)
-      } catch (e) {
-        // Ignore errors - network might not exist
-      }
-
-      await NativeWifiManager.connectToProtectedWifiSSID({
+      const connectOptions = {
         ssid,
         password: password || null,
         isHidden: false,
         timeout,
-      })
+        usePrefix,
+      }
+      console.log(`[WifiManager] Android connectOptions:`, JSON.stringify(connectOptions))
+      await NativeWifiManager.connectToProtectedWifiSSID(connectOptions)
     } else {
-      // iOS
+      // iOS: use joinOnce=true so system returns to previous network on disconnect
       if (usePrefix) {
-        if (password) {
-          await NativeWifiManager.connectToProtectedSSIDPrefix(
-            ssid,
-            password,
-            false
-          )
-        } else {
-          await NativeWifiManager.connectToSSIDPrefix(ssid)
-        }
-      } else {
-        await NativeWifiManager.connectToProtectedSSID(
+        await NativeWifiManager.connectToProtectedSSIDPrefixOnce(
           ssid,
           password || null,
-          false,
-          false
+          false, // isWEP
+          true   // joinOnce - critical for auto-return
+        )
+      } else {
+        await NativeWifiManager.connectToProtectedSSIDOnce(
+          ssid,
+          password || null,
+          false, // isWEP
+          true   // joinOnce - critical for auto-return
         )
       }
     }
@@ -242,6 +236,8 @@ const WifiManager = {
         console.warn("[WifiManager] Failed to bind traffic:", error)
         // Continue anyway - connection might still work on some devices
       }
+    } else {
+      isIoTNetworkBound = true
     }
 
     // Verify connection
@@ -262,6 +258,7 @@ const WifiManager = {
           // Ignore
         }
       }
+      isIoTNetworkBound = false
       throw new Error(
         `Failed to connect to IoT network. Expected: ${ssid}, Got: ${currentSSID}`
       )
@@ -275,35 +272,47 @@ const WifiManager = {
    *
    * This method:
    * 1. Unbinds app traffic from WiFi (Android)
-   * 2. Disconnects from the current network
-   * 3. Allows system to reconnect to preferred network
+   * 2. Removes the network configuration
+   * 3. System auto-reconnects to previous network (both platforms)
    */
   disconnectFromIoTNetwork: async (): Promise<void> => {
     console.log("[WifiManager] Disconnecting from IoT network")
 
-    // Unbind traffic first (Android)
-    if (Platform.OS === "android" && isIoTNetworkBound) {
-      try {
-        console.log("[WifiManager] Unbinding traffic")
-        await NativeWifiManager.forceWifiUsageWithOptions(false, {
-          noInternet: false,
-        })
-        isIoTNetworkBound = false
-      } catch (error) {
-        console.warn("[WifiManager] Failed to unbind traffic:", error)
-      }
-    }
-
-    // Disconnect
     if (Platform.OS === "android") {
+      // Unbind traffic first
+      if (isIoTNetworkBound) {
+        try {
+          console.log("[WifiManager] Unbinding traffic")
+          await NativeWifiManager.forceWifiUsageWithOptions(false, {
+            noInternet: false,
+          })
+        } catch (error) {
+          console.warn("[WifiManager] Failed to unbind traffic:", error)
+        }
+      }
+
+      // Disconnect - Android will auto-reconnect to preferred network
       try {
         await NativeWifiManager.disconnect()
       } catch (error) {
         console.warn("[WifiManager] Disconnect error:", error)
       }
+    } else {
+      // iOS: Remove the configuration - iOS will auto-return to previous network
+      // because we used joinOnce=true when connecting
+      try {
+        const currentSSID = await NativeWifiManager.getCurrentWifiSSID()
+        if (currentSSID) {
+          console.log(`[WifiManager] Removing iOS configuration for: ${currentSSID}`)
+          await NativeWifiManager.disconnectFromSSID(currentSSID)
+        }
+      } catch (error) {
+        console.warn("[WifiManager] iOS disconnect error:", error)
+      }
     }
 
-    console.log("[WifiManager] Disconnected from IoT network")
+    isIoTNetworkBound = false
+    console.log("[WifiManager] Disconnected - system will auto-reconnect to previous network")
   },
 
   /**

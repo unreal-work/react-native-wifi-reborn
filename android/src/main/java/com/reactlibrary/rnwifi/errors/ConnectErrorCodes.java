@@ -44,4 +44,8 @@ public enum ConnectErrorCodes {
      */
     android10ImmediatelyDroppedConnection,
     unableToConnect,
+    /**
+     * Feature not available for the current OS version.
+     */
+    unavailableForOSVersion,
 }

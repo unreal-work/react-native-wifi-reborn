@@ -1,5 +1,9 @@
 #import <React/RCTBridgeModule.h>
 
+#if __has_include(<RNWifi/RNWifi-Swift.h>)
+#import <RNWifi/RNWifi-Swift.h>
+#endif
+
 @interface RCT_EXTERN_MODULE(WifiManager, NSObject)
 
 // Get current SSID

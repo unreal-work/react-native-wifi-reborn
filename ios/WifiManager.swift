@@ -158,7 +158,14 @@ class WifiManager: NSObject {
             return
         }
 
-        let config = NEHotspotConfiguration(ssidPrefix: ssidPrefix, passphrase: passphrase, isWEP: isWEP)
+        let config: NEHotspotConfiguration
+        if passphrase.isEmpty {
+            // Open network (no password)
+            config = NEHotspotConfiguration(ssidPrefix: ssidPrefix)
+        } else {
+            // Protected network
+            config = NEHotspotConfiguration(ssidPrefix: ssidPrefix, passphrase: passphrase, isWEP: isWEP)
+        }
         config.joinOnce = joinOnce
 
         applyConfiguration(config, expectedSSID: nil, isPrefix: true, ssidPrefix: ssidPrefix,
